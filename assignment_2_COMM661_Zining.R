@@ -52,12 +52,12 @@ mvrnorm_fct <-
 # data check
 sim_data_mvrnorm = mvrnorm_fct(10000, c(0.3, 0.4), Sigma = diag(2))
 sim_data_mvrnorm = as.data.frame(sim_data_mvrnorm)
-colnames(sim_data_mvrnorm) = c("var_1", "var_2")
+colnames(sim_data_mvrnorm) = c("var_1: 0.3", "var_2: 0.4")
 
-p_mvrnorm_1 <-ggplot(sim_data_mvrnorm, aes(x=var_1)) + geom_histogram() + ggtitle("Multivariate: var_1")
+p_mvrnorm_1 <-ggplot(sim_data_mvrnorm, aes(x=`var_1: 0.3`)) + geom_histogram() + ggtitle("Multivariate: var_1")
 p_mvrnorm_1
 
-p_mvrnorm_2 <-ggplot(sim_data_mvrnorm, aes(x=var_2)) + geom_histogram()+ ggtitle("Multivariate: var_2")
+p_mvrnorm_2 <-ggplot(sim_data_mvrnorm, aes(x=`var_2: 0.4`)) + geom_histogram()+ ggtitle("Multivariate: var_2")
 p_mvrnorm_2
 #####################################################################################################################################################
 # gamma and inverse gamma distribuion
@@ -114,12 +114,15 @@ sim_data_gamma = matrix(0, nrow = 10000, ncol = 2)
 for (i in 1:10000){
   sim_data_gamma[i,] = gamma_fun(5,1)
 }
-mean(sim_data_gamma[,1])
-mean(sim_data_gamma[,2])
-plot(sim_data_gamma[,1])
+
 hist(sim_data_gamma[,1])
-plot(sim_data_gamma[,2])
 hist(sim_data_gamma[,2])
+sim_data_gamma = as.data.frame(sim_data_gamma)
+colnames(sim_data_gamma) = c("Gamma", "Inverse Gamma")
+p_gamma = ggplot(sim_data_gamma, aes(x=Gamma)) + geom_histogram() + ggtitle("Histagram: Gamma Distribution with alpha=5, beta=1")
+p_gamma
+p_invgamma = ggplot(sim_data_gamma, aes(x=`Inverse Gamma`)) + geom_histogram() + ggtitle("Histagram: Inverse Gamma Distribution with alpha=5, beta=1")
+p_invgamma
 #####################################################################################################################################################
 # wishart and inverse wishart distribuion
 #####################################################################################################################################################
