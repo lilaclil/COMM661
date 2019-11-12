@@ -1,0 +1,301 @@
+---
+title: "assignment_3_COMM661_Zining"
+author: "Zining Wang"
+date: "11/11/2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+# 1. Binary Probit Model 
+  - code to generate random samples for the parameters in a binary probit model 
+  - Program inputs: number of iterations, dependent variable, independent variables, priors 
+  - Program outputs: beta and variance matrix of beta 
+  - Use simulated data to confirm the correctness of your estimation algorithm 
+  - Comment on how the specification of priors would affect model estimates 
+
+# 2. Multinominal Logit Model
+  - code to generate random samples for the parameters in a multinomial logit model.
+  - Program inputs: number of iterations, dependent variable, independent variables, priors
+  -  Program outputs: beta and variance matrix of beta
+  - Please use simulated data to confirm the correctness of your estimation algorithm
+  - Please comment on the performance of mixing/autocorrelations of the output you get 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+# setup
+rm(list = ls())
+path = '/Users/wangzining/Desktop/year_2/COMM661/assign_3'
+setwd(path)
+source("mvrnorm.R")
+# install.packages("truncnorm")
+#install.packages("emdbook")
+require(emdbook)
+require(truncnorm)
+require(ggplot2)
+require(data.table)
+require(DescTools)
+options(scipen=999)
+```
+# 1. Binary Probit Model
+-Data Simulation and Model inputs
+
+```{r}
+# Data Simulation
+nsim = 10000 # of simulation
+N = 1000 # of obs
+
+betas_true = c(0.3, 0.6, 0.9) # beta
+#betas_true = c(-1,0.5,1.5)
+# intcpt = 1 # intcpt
+X = cbind(rep(1, N), mvrnorm_fct(N, c(0, 0), Sigma = diag(2)))
+E = rnorm(n=N, mean=0, sd=1)
+Z = X %*% betas_true+ E
+Y = rep(0, N)
+Y[which(Z>0)] = 1
+```
+-binary probit function
+```{r binary_logit_fct}
+binary_probit <- function(X, Z, Y, N, beta_0, B_0, nsim){
+  # X: covariates
+  # Z: latent variable
+  # Y: Choice outcome
+  # N: number of observations
+  # beta_0: prior of means of parameters
+  # B_0: prior of variance of parameters
+  # nsim: rounds of simulations
+  
+  nparams=ncol(X)
+  sims=matrix(0,nrow=nsim,ncol=nparams)
+  sims[1,]=1 # to start
+  
+  #Gibbs Sampler
+  for(i in 2:nsim){
+    # updata beta
+    beta_p = solve(t(X) %*% X + solve(B_0)) %*% (t(X)%*%Z + solve(B_0) %*% beta_0)
+    # updata B
+    B_p = solve(t(X) %*% X + solve(B_0))
+    # update Z
+    Z_p = rep(NA, N)
+    mean_trunc =X%*%sims[i-1,] # X %*% beta_p
+    Z_p[which(Y==1)] = rtruncnorm(1, a = 0, b=Inf, mean = mean_trunc[which(Y==1)], sd = 1)
+    Z_p[which(Y==0)] = rtruncnorm(1, a = -Inf, b=0, mean = mean_trunc[which(Y==0)], sd = 1)
+    Z = Z_p # assign posterior as prior
+    # the updated of Z and beta is interchangable
+    sims[i,1:nparams]=mvrnorm_fct(1, beta_p, B_p) # draw beta: from multivariate normal: Pi(beta|y, B) <- N_k (beta_hat, B_hat)
+  }
+  return(sims)
+}
+```
+-output
+```{r}
+# set priors
+beta_0 = c(0.01, 0.01, 0.01) # beta*, prior: beta ~ N(beta_0, B_0), uninformative prior
+B_0 = diag(3) # B*, prior: beta ~ N(beta*, B_0)
+
+output = binary_probit(X = X, Z = Z, Y = Y, N = N, beta_0 = beta_0, B_0 = B_0, nsim = nsim)
+output = setDT(as.data.frame(output))
+
+output[,draws:=seq_len(nrow(output))]
+colnames(output) = c("beta_0: 0.3", "beta_1: 0.6", "beta_2: 0.9", "draws")
+
+output_melt = melt(output, id.vars = "draws", 
+                   measure.vars = c("beta_0: 0.3", "beta_1: 0.6", "beta_2: 0.9"))
+
+p_posterior <- ggplot(output_melt, aes( x =draws , y = value ) ) +geom_point()  + facet_wrap(vars(variable), ncol=3) + ggtitle("Posteriors: Univariate") 
+
+```
+
+```{r}
+p_posterior 
+```
+
+```{r}
+# change priors to different values
+beta_0 = c(1000, 1000, 1000) # beta*, prior: beta ~ N(beta_0, B_0), informative but biased prior
+B_0 = diag(3) # B*, prior: beta ~ N(beta*, B_0)
+output = binary_probit(X = X, Z = Z, Y = Y, N = N, beta_0 = beta_0, B_0 = B_0, nsim = nsim)
+output = setDT(as.data.frame(output))
+
+output[,draws:=seq_len(nrow(output))]
+colnames(output) = c("beta_0: 0.3", "beta_1: 0.6", "beta_2: 0.9", "draws")
+
+output_melt = melt(output, id.vars = "draws", 
+                   measure.vars = c("beta_0: 0.3", "beta_1: 0.6", "beta_2: 0.9"))
+
+p_posterior_rev <- ggplot(output_melt, aes( x =draws , y = value ) ) +geom_point()  + facet_wrap(vars(variable), ncol=3) + ggtitle("Posteriors: Univariate") 
+```
+
+```{r}
+p_posterior_rev
+```
+
+- Given uninformative priors, the parameters are accurately recovered. Given strong but biased priors (which is quite different from the true values), the parameters cannot be accurately recovered.  
+# 2. Multinominal Logit Model
+- Data Simulation and Model inputs
+```{r}
+set.seed(1234) # set seeds
+betas_true = c(0.4, 0.6, 0.9) # beta, 3 parameters
+N = 10000 # 1000 observations
+
+X_1 = cbind(mvrnorm_fct(N, c(0, 0, 0), Sigma = diag(3))) # covariates for alternative 1
+X_2 = cbind(mvrnorm_fct(N, c(0, 0, 0), Sigma = diag(3))) # covariates for alternative 1
+X_3 = cbind(mvrnorm_fct(N, c(0, 0, 0), Sigma = diag(3))) # covariates for alternative 1
+X = rbind(X_1, X_2, X_3)
+
+U_1 = exp(X_1 %*% betas_true) #+ rGumbel(N, loc=0, scale=1), a modified version: to consider epsilon as well
+U_2 = exp(X_2 %*% betas_true) 
+U_3 = exp(X_3 %*% betas_true)
+U = cbind(U_1, U_2, U_3) # calculate utilities
+P = U /rowSums(U) # calculate the probability of choosing each alternative
+
+# generate accumulative distirbuion
+C = cbind(P[,1], (P[,1] + P[,2]))
+C =setDT(as.data.frame(C))
+colnames(C) = c("thresh_1", "thresh_2")
+set.seed(1234)
+# decite whether to accept or to reject:
+# draw from a uniform distribution [0,1]
+C[, criteria:=runif(N, 0, 1)]
+
+C[, I:=3]
+C[criteria < thresh_1, I:=1] 
+C[(criteria > thresh_1) & (criteria < thresh_2), I:=2]
+
+table(C[, I]) # check the simulated choices
+
+mu=c(1, 1, 1) # prior of beta (mean)
+Sigma=diag(3) # prior of beta (variance)
+```
+- multinormial logit model
+```{r}
+multinorm_logit = function(X, I, beta_prev, mu, Sigma, sd_tune, nsim){ 
+  # X: covariates
+  # I: choice outcomes
+  # beta_prev: prior of parameters
+  # mu and Sigma hyper parameters (mean and variance of parameters)
+  # sd_tune: tuning parameter to decite the pace of beta proposals
+  # nsim: rounds of simulations
+  
+  nparams=length(beta_prev) # number of parameters
+  sims=matrix(0, nrow=nsim,ncol=nparams) # empty matrix to store beta draws
+  sims[1,] = beta_prev # to start, set prior
+  
+  for(i in 2:nsim){
+    # draw prior of beta
+    Prob_MH = function(beta){ # use random walk to get beta proposals
+    prior =  dmvnorm(x = beta, mu=mu, Sigma=Sigma, log=TRUE) # set prior for each round
+    # update the likelihood of chosen each alternative
+    U = matrix( exp(X%*% beta), nrow = N, byrow = F) # calculate the utility given the beta input
+    
+    likelihood = rep(NA, N)
+    for (i in 1:N){
+      likelihood[i] = log(U[i,I[i]]/sum(U[i,]))
+    } # calculate the log likelihood: log(L(beta|X, I)), 
+      # in which L(beta|X, I) = prod(Pr(I_i = j|X_i, beta)), 
+      # Pr(I_i = j|X_i, beta) = exp(x'_ijbeta)/(summation(exp(x'_ijbeta)))
+      # the log version is used for numeric stability
+      # reference: Rossi, P. E., Allenby, G. M., & McCulloch, R. (2012). Bayesian statistics and marketing. John Wiley & Sons.
+      # reference: https://www4.stat.ncsu.edu/~reich/ABA/code/logit
+    
+    posterior = prior + sum(likelihood) # use the log version (multiple changes to addition)
+    return(posterior)
+    }
+    # use MH
+    
+    for (j in seq_len(nparams)){ # iterate over all elements of beta
+    beta_post =beta_prev
+    
+    # proporal of beta[j]
+    beta_post[j] =beta_prev[j] + rnorm(1, mean=0, sd=sd_tune) # can be tightened/loosened
+    
+    # probability of move
+    p_accept = min(1, exp(Prob_MH(beta_post) - Prob_MH(beta_prev)) ) # use exp transformation, use "-" instead of "/" to avoid rounding to 0
+    
+    # decite whether to accept or to reject:
+    # draw from a uniform distribution [0,1]
+    draw = runif(1, 0, 1)
+    if (draw <= p_accept){beta_prev = beta_post}else{beta_post = beta_prev}
+    }
+    sims[i,] = beta_post # store the updated params
+  }
+return(sims)
+}
+
+```
+- change the tuning parameter (sd to generate proposals of beta) 
+```{r}
+output_1 = multinorm_logit(X=X, I=C[,I], beta_prev = c(0.01, 0.01, 0.01), mu = mu, Sigma = Sigma, sd_tune = 0.1, nsim = 1000)
+
+output_1 = setDT(as.data.frame(output_1))
+output_1[,draws:=seq_len(nrow(output_1))]
+colnames(output_1) = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9", "draws")
+
+# calculate lags
+output_1_lag_10 = output_1[-c(1:10), ]
+test.1.10 = c(cor(output_1_lag_10[["beta_1: 0.4"]], output_1[["beta_1: 0.4"]][1:(nrow(output_1)-10)]), cor(output_1_lag_10[["beta_2: 0.6"]], output_1[["beta_2: 0.6"]][1:(nrow(output_1)-10)]), cor(output_1_lag_10[["beta_3: 0.9"]], output_1[["beta_3: 0.9"]][1:(nrow(output_1)-10)]))
+test.1.10
+
+output_1_lag_100 = output_1[-c(1:100), ]
+test.1.100 = c(cor(output_1_lag_100[["beta_1: 0.4"]], output_1[["beta_1: 0.4"]][1:(nrow(output_1)-100)]), cor(output_1_lag_100[["beta_2: 0.6"]], output_1[["beta_2: 0.6"]][1:(nrow(output_1)-100)]), cor(output_1_lag_100[["beta_3: 0.9"]], output_1[["beta_3: 0.9"]][1:(nrow(output_1)-100)]))
+test.1.100
+
+output_1_melt = melt(output_1, id.vars = "draws",  measure.vars = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9")) 
+p_posterior_0.1 <- ggplot(output_1_melt, aes( x =draws , y = value ) ) +geom_point()  + facet_wrap(vars(variable), ncol=3) + ggtitle("Posteriors: Multinomial Logit, sd = 0.1") 
+
+```
+
+```{r}
+p_posterior_0.1 
+```
+
+```{r}
+
+output_2 = multinorm_logit(X=X, I=C[,I], beta_prev = c(0.01, 0.01, 0.01), mu = mu, Sigma = Sigma, sd_tune = 0.02, nsim = 1000)
+
+output_2 = setDT(as.data.frame(output_2))
+output_2[,draws:=seq_len(nrow(output_2))]
+colnames(output_2) = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9", "draws")
+
+# calculate lags
+output_2_lag_10 = output_2[-c(1:10), ]
+test.1.10 = c(cor(output_2_lag_10[["beta_1: 0.4"]], output_2[["beta_1: 0.4"]][1:(nrow(output_2)-10)]), cor(output_2_lag_10[["beta_2: 0.6"]], output_2[["beta_2: 0.6"]][1:(nrow(output_2)-10)]), cor(output_2_lag_10[["beta_3: 0.9"]], output_2[["beta_3: 0.9"]][1:(nrow(output_2)-10)]))
+test.1.10
+
+output_2_lag_100 = output_2[-c(1:100), ]
+test.1.100 = c(cor(output_2_lag_100[["beta_1: 0.4"]], output_2[["beta_1: 0.4"]][1:(nrow(output_2)-100)]), cor(output_2_lag_100[["beta_2: 0.6"]], output_2[["beta_2: 0.6"]][1:(nrow(output_2)-100)]), cor(output_2_lag_100[["beta_3: 0.9"]], output_2[["beta_3: 0.9"]][1:(nrow(output_2)-100)]))
+test.1.100
+
+output_2_melt = melt(output_2, id.vars = "draws",  measure.vars = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9")) 
+p_posterior_0.02 <- ggplot(output_2_melt, aes( x =draws , y = value ) ) +geom_point()  + facet_wrap(vars(variable), ncol=3) + ggtitle("Posteriors: Multinomial Logit, sd = 0.02") 
+
+```
+
+```{r}
+p_posterior_0.02
+```
+
+```{r}
+output_3 = multinorm_logit(X=X, I=C[,I], beta_prev = c(0.01, 0.01, 0.01), mu = mu, Sigma = Sigma, sd_tune = 0.2, nsim = 1000)
+
+output_3 = setDT(as.data.frame(output_3))
+output_3[,draws:=seq_len(nrow(output_3))]
+colnames(output_3) = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9", "draws")
+
+# calculate lags
+output_3_lag_10 = output_3[-c(1:10), ]
+test.1.10 = c(cor(output_3_lag_10[["beta_1: 0.4"]], output_3[["beta_1: 0.4"]][1:(nrow(output_3)-10)]), cor(output_3_lag_10[["beta_2: 0.6"]], output_3[["beta_2: 0.6"]][1:(nrow(output_3)-10)]), cor(output_3_lag_10[["beta_3: 0.9"]], output_3[["beta_3: 0.9"]][1:(nrow(output_3)-10)]))
+test.1.10
+
+output_3_lag_100 = output_3[-c(1:100), ]
+test.1.100 = c(cor(output_3_lag_100[["beta_1: 0.4"]], output_3[["beta_1: 0.4"]][1:(nrow(output_3)-100)]), cor(output_3_lag_100[["beta_2: 0.6"]], output_3[["beta_2: 0.6"]][1:(nrow(output_3)-100)]), cor(output_3_lag_100[["beta_3: 0.9"]], output_3[["beta_3: 0.9"]][1:(nrow(output_3)-100)]))
+test.1.100
+
+output_3_melt = melt(output_3, id.vars = "draws",  measure.vars = c("beta_1: 0.4", "beta_2: 0.6", "beta_3: 0.9")) 
+p_posterior_0.2 <- ggplot(output_3_melt, aes( x =draws , y = value ) ) +geom_point()  + facet_wrap(vars(variable), ncol=3) + ggtitle("Posteriors: Multinomial Logit, sd = 0.2") 
+
+```
+
+```{r}
+p_posterior_0.2
+```
+
+- When sd is set to be a small value(e.g. 0.02), the beta draws slowly appoaches to the true values; when sd is set to be a larger value(e.g. 0.2), the beta draws appoaches to the true values faster. The scope of difference acoss beta draws in later rounds is also larger. Hence, the results suggest there is a trade-off between converge rate and precision.
