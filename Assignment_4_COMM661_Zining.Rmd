@@ -1,0 +1,430 @@
+---
+title: "Assignment 4 of COMM661"
+author: "Zining Wang"
+date: "11/17/2019"
+output:
+  html_document: default
+  pdf_document: default
+---
+# Assignment 4 of COMM661
+# CLV model
+# Zining Wang
+# Nov 17, 2019
+
+```{r}
+require(data.table)
+require(MCMCpack)
+require(matrixcalc) #  vec operator
+# install.packages("bayesplot")
+require(mvtnorm)
+require(bayesplot)
+source('/Users/wangzining/Desktop/year_2/COMM661/assign_4/multivariate_reg.R') # use the multivariate Bayesian regression file
+options(scipen=999)
+file_path = '/Users/wangzining/Desktop/year_2/COMM661/assign_4/googleCLV_data'
+setwd(file_path)
+customer = fread('customer.csv')
+amount = fread('amount.csv')
+process = fread('process.csv')
+```
+
+- Parameters
+```{r}
+## parameters
+niter = 10000 # number of iterations
+sd_tune = 0.05 # tuning parameter for MH
+beta_0 = 1 # hyper prior for beta (mean)
+B_0 = 1 # hyper prior for beta (var)
+s_0 = 1 # prior of IG's shape parameter, for epsilon
+v_0 = 1 # prior of IG's scale parameter, for epsilon
+G_0 = matrix(1, nrow = 5, ncol = 3) # prior of G'
+A = diag(5) # hyper matrix of G
+rou_0 = 1 # prior of IW, for Sigma
+R_0 = diag(3) # # prior of IW, for epsilon
+
+## data
+n = nrow(customer) # number of observations
+# nn = nrow(amount) # number of transactions # consider to remove 
+xi = (process$n - 1) # total number of transactions per consumer
+tx = process$tx # last time purchase
+T = process$T # total length
+d = amount$t # d_{ij}
+z = amount$amount
+X = as.matrix(cbind(rep(1, n), customer$google, customer$online, customer$research, customer$lateperiod))
+
+```
+
+- Independence
+```{r}
+main <- function(n, xi, tx, T, d, z, X, beta_0, B_0, s_0, v_0, G_0, A, rou_0, R_0, niter, sd_tune){ 
+  
+  # parameter matrix
+  param_mx = matrix(0,nrow=niter, ncol=17) 
+  # 1:15: vectorization of G'
+  # 16: beta
+  # 17: sigma_epsilon2
+  
+  param_mx[1, ] = 1 # set all priors to be 1
+  # variance matrix
+  variance_mx = matrix(0,nrow=niter*3,ncol=3)
+  variance_mx[1:3, 1:3] = diag(3) # prior of Sigma
+  
+  # do the iteration
+  for (iter in 2:niter){
+    # iteration for each consumer
+    theta = matrix(c(rep(-4, 2*n), rep(4, n)), nrow=n, ncol=3) # prior, for each consumer i, ln(mu_i), ln(lamda_i), bi, prior is choosing accoriding to the C code
+    G = matrix(param_mx[iter-1,1:15], byrow = F, nrow =5) # G is a 5*3 matrix
+    theta_bar = X %*% G # check whether the colnames of G matters
+    beta = param_mx[iter-1,16]
+    sigma_epsilon2 = param_mx[iter-1,17]
+    
+    Sigma=variance_mx[(3*(iter-2)+1):(3*(iter-1)), ]
+    Sigma_11 = Sigma[1:2, 1:2] # 2*2
+    Sigma_12 = matrix(Sigma[1:2, 3]) # 2*1
+    Sigma_21 = Sigma[3, 1:2] # 1*2
+    Sigma_22 = Sigma[3, 3] # Sigma_b_2
+    
+    
+      # Step 1: sample theta
+      # a. customer lifetime and transaction rate
+      # sample eta_i from ta_i| y_i, b_i, G, Sigma
+      # L(eta_i | x_i, t_{ix}, T_i), eqn 1
+  
+      b_bar = theta_bar[, 3]
+      eta = theta[, c(1:2)]
+      b = theta[, 3]
+      
+      eta_tilda = eta + (b - b_bar) %*% t(Sigma_12) /Sigma_22 # mean, eta now is a col vec
+      Sigma_11_tilda = Sigma_11 - (Sigma_12/Sigma_22) %*% Sigma_21 # variance
+      
+      # draw eta_prev from N(eta_tilda, Sigma_11_tilda)
+      eta_prev = matrix(NA, nrow=n, ncol=2)
+      for (i in 1:n){
+      eta_prev[i,] = mvrnorm(1, eta_tilda[i,], Sigma_11_tilda)
+      }
+      
+      # independent likelihood 
+      
+      likelihood_fct = function(eta_value){ # eta_value should be a matrix with 2 columns
+        
+        llambda = eta_value[, 1]
+        lambda = exp(llambda)
+        lmu = eta_value[, 2]
+        mu = exp(lmu)
+        
+        temp = log(mu * exp(-(lambda +mu)*tx) + lambda *exp( -(lambda + mu)*T))
+        likelihood_eta = xi*llambda - log(lambda + mu) + temp
+        likelihood_eta[which(likelihood_eta < -100)] = -100
+        return(likelihood_eta)
+      }
+      # use MH to update
+      # independence sampling
+      eta_post = eta_prev + rnorm(n*2,mean=0,sd=0.05)
+
+      likelihood = likelihood_fct(eta_post) - likelihood_fct(eta_prev)
+      exp_likelihood = exp(likelihood)
+      # exp_likelihood[is.na(exp_likelihood)] = 0.00000000001
+ 
+      alpha = unlist(lapply(exp_likelihood, function(x){min(1, x)}))
+      u = runif(n, 0, 1)
+        eta[which(u <= alpha),] = eta_post[which(u <= alpha),]
+        eta[which(u > alpha),] = eta_prev[which(u > alpha),]
+      
+      # b. gross margin
+      # sample b_i from b_i| z_i, eta_i, beta, sigma_epsilon_2, G, Sigma
+      # ditribute normal N(b_i_tilda, sigma_bi_2_tilda)
+
+      eta_bar = theta_bar[, c(1:2)] 
+      b_hat = b_bar + (eta - eta_bar) %*% (Sigma_21/Sigma_22)  
+      Sigma_22_hat = Sigma_22 - Sigma_21 %*% solve(Sigma_11) %*% Sigma_12 
+
+      sigma_b2_tilda = 1/ ( 1/c(Sigma_22_hat) + (xi+1)/sigma_epsilon2 ) # var of b_i
+ 
+      summation = rep(NA, n)
+      z_i0 = rep(NA, n)
+      for (i in 1:n){
+      z_i0[i] = z[which(amount$custID == i)][1]
+      
+      if(xi[i] > 0){
+        z_temp = z[which(amount$custID == i)][-1]
+        d_temp = d[which(amount$custID == i)][-1]
+        summation[i] = sum(log(z_temp) - beta*log(d_temp), na.rm = T)
+      }else{
+        summation[i] = 0
+      }}
+      
+      b_tilda = sigma_b2_tilda * ( 1/c(Sigma_22_hat) * b_hat + 1/sigma_epsilon2 * (log(z_i0) + summation) ) # mean of b_i
+      
+      # store eta and individual b_i's
+      theta[,1:2] = eta
+      theta[,3] = b_tilda
+    
+    # Step 2: sample (beta, sigma_epsilon2) from beta, sigma_epsilon2 | {z_i}, {b_i}
+    # use Bayesian reg: ln(z_{ij}) = b_i + beta * ln(d_{ij}) + epsilon_{ij}
+
+    #draw for beta and delta
+    b=theta[,3]
+    y=log(z) - b[amount$custID] # subtract thhe intercept term
+    x=log(d)
+    sigma_epsilon2 = rinvgamma(1, shape = (s_0 + length(x)/2), 
+                               scale =0.5*(v_0 + t((y-(x*beta))) %*% (y-(x*beta))))
+    sigma_epsilon2p = sigma_epsilon2 * (1/(t(x) %*% x+ 1/(B_0/sigma_epsilon2))) # update sigma
+    beta_mean_p = (sigma_epsilon2p) %*% (t(x) %*% y/sigma_epsilon2 + (1/B_0) %*% beta_0)
+    #draw from multivariate normal distribution
+    beta = rnorm(1, beta_mean_p, sigma_epsilon2p) # update beta
+    
+    # Step 3: sample (G, Sigma) from G, Sigma|{theta_i}, theta_i = G' * X_i + xi_i  Bayesian regression
+    #draw for G and sigma 
+    G_tilda = solve(t(X) %*% X + A) %*% ( t(X) %*% theta + A %*% G_0) 
+    S = t(theta - X %*% G_tilda) %*% (theta - X %*% G_tilda) + t(G_tilda - G_0) %*% A %*% (G_tilda - G_0)
+    # update Sigma
+    Sigma_p = riwish(rou_0 + n, R_0 + S) # solve(Sigma) ~ Wishart(rou0, R0)
+    G_mean = vec(G_tilda)
+    Var = kronecker(Sigma_p, solve(t(X) %*% X + A))
+    # update G
+    G_p = mvrnorm(1, G_mean, Var)
+    
+    # store the updated values
+    param_mx[iter,1:15] = G_p
+    param_mx[iter,16] = beta
+    param_mx[iter,17] = sigma_epsilon2
+    variance_mx[(3*(iter-1)+1):(3*iter), ] = Sigma_p
+  }
+  posteriors = list(param_mx, variance_mx)
+  return(posteriors)
+}
+
+
+```
+
+```{r}
+output_ind = main(n, xi, tx, T, d, z, X, beta_0, B_0, s_0, v_0, G_0, A, rou_0, R_0, niter=10000, sd_tune)
+colnames(output_ind[[1]]) = c('Incpt_log(mu): −5.92', 'Google_log(mu): -0.11', 'Online_log(mu): -0.15', 'Research_log(mu): -0.73', 'Late_log(mu): -0.54',
+                              'Incpt_log(lambda): -4.44', 'Google_log(lambda): 0.51', 'Online_log(lambda): -0.44', 'Research_log(lambda): -0.58', 'Late_log(lambda): -0.3',
+                              'Incpt_bi: 4.60', 'Google_bi: 0.14', 'Online_bi: -0.25', 'Research_bi: -0.32', 'Late_bi: -0.04', 'beta: 0.038', 'sigma_epsilon2: 0.66')
+color_scheme_set("blue")
+plot_param_ind = mcmc_trace(output_ind[[1]])
+# treat the first 2000 draws as burnin
+# get quantile
+quantile_output_ind = apply(output_ind[[1]][2001:10000,], 2, function(x){quantile(x, probs = c(0, 0.05, 0.5, 0.95, 1))}) 
+quantile_output_ind
+# Sigma
+s1 = seq(6000, (30000-3), 3) + 1
+s2 = seq(6000, (30000-3), 3) + 2
+s3 = seq(6000, (30000-3), 3) + 3
+sigma_mu2 = output_ind[[2]][s1,1]
+sigma_mu_lambda = output_ind[[2]][s2,1]
+sigma_lambda2 = output_ind[[2]][s2,2]
+sigma_mu_beta = output_ind[[2]][s3,1]
+sigma_lambda_beta = output_ind[[2]][s3,2]
+sigma_beta2 = output_ind[[2]][s3,3] # [6001:30000,]
+Sigma = cbind(sigma_mu2, sigma_mu_lambda, sigma_lambda2, sigma_mu_beta, sigma_lambda_beta, sigma_beta2 )
+quantile_Sigma_ind = apply(Sigma, 2, function(x){quantile(x, probs = c(0, 0.05, 0.5, 0.95, 1))}) 
+quantile_Sigma_ind
+s1t = seq(0, (30000-3), 3) + 1
+s2t = seq(0, (30000-3), 3) + 2
+s3t = seq(0, (30000-3), 3) + 3
+sigma_mu2 = output_ind[[2]][s1t,1]
+sigma_mu_lambda = output_ind[[2]][s2t,1]
+sigma_lambda2 = output_ind[[2]][s2t,2]
+sigma_mu_beta = output_ind[[2]][s3t,1]
+sigma_lambda_beta = output_ind[[2]][s3t,2]
+sigma_beta2 = output_ind[[2]][s3t,3] # [6001:30000,]
+Sigmat = cbind(sigma_mu2, sigma_mu_lambda, sigma_lambda2, sigma_mu_beta, sigma_lambda_beta, sigma_beta2 )
+
+plot_Sigma_ind = mcmc_trace(Sigmat)
+```
+
+```{r}
+plot_param_ind 
+plot_Sigma_ind
+```
+
+- Random Walk
+
+```{r}
+main <- function(n, xi, tx, T, d, z, X, beta_0, B_0, s_0, v_0, G_0, A, rou_0, R_0, niter, sd_tune){ 
+  
+  # parameter matrix
+  param_mx = matrix(0,nrow=niter, ncol=17) 
+  # 1:15: vectorization of G'
+  # 16: beta
+  # 17: sigma_epsilon2
+  
+  param_mx[1, ] = 1 # set all priors to be 1
+  # variance matrix
+  variance_mx = matrix(0,nrow=niter*3,ncol=3)
+  variance_mx[1:3, 1:3] = diag(3) # prior of Sigma
+  
+  # do the iteration
+  for (iter in 2:niter){
+    # iteration for each consumer
+    theta = matrix(c(rep(-4, 2*n), rep(4, n)), nrow=n, ncol=3) # prior, for each consumer i, ln(mu_i), ln(lamda_i), bi, prior is choosing accoriding to the C code
+    G = matrix(param_mx[iter-1,1:15], byrow = F, nrow =5) # G is a 5*3 matrix
+    theta_bar = X %*% G # check whether the colnames of G matters
+    beta = param_mx[iter-1,16]
+    sigma_epsilon2 = param_mx[iter-1,17]
+    
+    Sigma=variance_mx[(3*(iter-2)+1):(3*(iter-1)), ]
+    Sigma_11 = Sigma[1:2, 1:2] # 2*2
+    Sigma_12 = matrix(Sigma[1:2, 3]) # 2*1
+    Sigma_21 = Sigma[3, 1:2] # 1*2
+    Sigma_22 = Sigma[3, 3] # Sigma_b_2
+    
+    
+      # Step 1: sample theta
+      # a. customer lifetime and transaction rate
+      # sample eta_i from ta_i| y_i, b_i, G, Sigma
+      # L(eta_i | x_i, t_{ix}, T_i), eqn 1
+  
+      b_bar = theta_bar[, 3]
+      eta = theta[, c(1:2)]
+      b = theta[, 3]
+      
+      eta_tilda = eta + (b - b_bar) %*% t(Sigma_12) /Sigma_22 # mean, eta now is a col vec
+      Sigma_11_tilda = Sigma_11 - (Sigma_12/Sigma_22) %*% Sigma_21 # variance
+      
+      # draw eta_prev from N(eta_tilda, Sigma_11_tilda)
+      eta_prev = matrix(NA, nrow=n, ncol=2)
+      for (i in 1:n){
+      eta_prev[i,] = mvrnorm(1, eta_tilda[i,], Sigma_11_tilda)
+      }
+      
+      # random walk likelihood 
+      
+      likelihood_fct_rw = function(eta_value){ # eta_value should be a matrix with 2 columns
+        
+        llambda = eta_value[, 1]
+        lambda = exp(llambda)
+        lmu = eta_value[, 2]
+        mu = exp(lmu)
+        
+        temp = log(mu * exp(-(lambda +mu)*tx) + lambda *exp( -(lambda + mu)*T))
+        likelihood_eta = xi*llambda - log(lambda + mu) + temp
+        likelihood_eta[which(likelihood_eta < -100)] = -100
+        density_eta = rep(NA, n)
+        for (i in 1:n){
+        density_eta[i] = dmvnorm(eta_value[i,], mean = eta_tilda[i,], Sigma_11_tilda)
+        }
+        return(likelihood_eta * density_eta)
+      }
+      # use MH to update
+      # independence sampling
+      eta_post = eta_prev + rnorm(n*2,mean=0,sd=0.05)
+
+      likelihood = likelihood_fct_rw(eta_post) - likelihood_fct_rw(eta_prev)
+      exp_likelihood = exp(likelihood)
+      # exp_likelihood[is.na(exp_likelihood)] = 0.00000000001
+ 
+      alpha = unlist(lapply(exp_likelihood, function(x){min(1, x)}))
+      u = runif(n, 0, 1)
+        eta[which(u <= alpha),] = eta_post[which(u <= alpha),]
+        eta[which(u > alpha),] = eta_prev[which(u > alpha),]
+      
+      # b. gross margin
+      # sample b_i from b_i| z_i, eta_i, beta, sigma_epsilon_2, G, Sigma
+      # ditribute normal N(b_i_tilda, sigma_bi_2_tilda)
+
+      eta_bar = theta_bar[, c(1:2)] 
+      b_hat = b_bar + (eta - eta_bar) %*% (Sigma_21/Sigma_22)  
+      Sigma_22_hat = Sigma_22 - Sigma_21 %*% solve(Sigma_11) %*% Sigma_12 
+
+      sigma_b2_tilda = 1/ ( 1/c(Sigma_22_hat) + (xi+1)/sigma_epsilon2 ) # var of b_i
+ 
+      summation = rep(NA, n)
+      z_i0 = rep(NA, n)
+      for (i in 1:n){
+      z_i0[i] = z[which(amount$custID == i)][1]
+      
+      if(xi[i] > 0){
+        z_temp = z[which(amount$custID == i)][-1]
+        d_temp = d[which(amount$custID == i)][-1]
+        summation[i] = sum(log(z_temp) - beta*log(d_temp), na.rm = T)
+      }else{
+        summation[i] = 0
+      }}
+      
+      b_tilda = sigma_b2_tilda * ( 1/c(Sigma_22_hat) * b_hat + 1/sigma_epsilon2 * (log(z_i0) + summation) ) # mean of b_i
+      
+      # store eta and individual b_i's
+      theta[,1:2] = eta
+      theta[,3] = b_tilda
+    
+    # Step 2: sample (beta, sigma_epsilon2) from beta, sigma_epsilon2 | {z_i}, {b_i}
+    # use Bayesian reg: ln(z_{ij}) = b_i + beta * ln(d_{ij}) + epsilon_{ij}
+
+    #draw for beta and delta
+    b=theta[,3]
+    y=log(z) - b[amount$custID] # subtract thhe intercept term
+    x=log(d)
+    sigma_epsilon2 = rinvgamma(1, shape = (s_0 + length(x)/2), 
+                               scale =0.5*(v_0 + t((y-(x*beta))) %*% (y-(x*beta))))
+    sigma_epsilon2p = sigma_epsilon2 * (1/(t(x) %*% x+ 1/(B_0/sigma_epsilon2))) # update sigma
+    beta_mean_p = (sigma_epsilon2p) %*% (t(x) %*% y/sigma_epsilon2 + (1/B_0) %*% beta_0)
+    #draw from multivariate normal distribution
+    beta = rnorm(1, beta_mean_p, sigma_epsilon2p) # update beta
+    
+    # Step 3: sample (G, Sigma) from G, Sigma|{theta_i}, theta_i = G' * X_i + xi_i  Bayesian regression
+    #draw for G and sigma 
+    G_tilda = solve(t(X) %*% X + A) %*% ( t(X) %*% theta + A %*% G_0) 
+    S = t(theta - X %*% G_tilda) %*% (theta - X %*% G_tilda) + t(G_tilda - G_0) %*% A %*% (G_tilda - G_0)
+    # update Sigma
+    Sigma_p = riwish(rou_0 + n, R_0 + S) # solve(Sigma) ~ Wishart(rou0, R0)
+    G_mean = vec(G_tilda)
+    Var = kronecker(Sigma_p, solve(t(X) %*% X + A))
+    # update G
+    G_p = mvrnorm(1, G_mean, Var)
+    
+    # store the updated values
+    param_mx[iter,1:15] = G_p
+    param_mx[iter,16] = beta
+    param_mx[iter,17] = sigma_epsilon2
+    variance_mx[(3*(iter-1)+1):(3*iter), ] = Sigma_p
+  }
+  posteriors = list(param_mx, variance_mx)
+  return(posteriors)
+}
+
+```
+
+```{r}
+output_rw = main(n, xi, tx, T, d, z, X, beta_0, B_0, s_0, v_0, G_0, A, rou_0, R_0, niter=10000, sd_tune)
+colnames(output_rw[[1]]) = c('Incpt_log(mu): −5.92', 'Google_log(mu): -0.11', 'Online_log(mu): -0.15', 'Research_log(mu): -0.73', 'Late_log(mu): -0.54',
+                              'Incpt_log(lambda): -4.44', 'Google_log(lambda): 0.51', 'Online_log(lambda): -0.44', 'Research_log(lambda): -0.58', 'Late_log(lambda): -0.3',
+                              'Incpt_bi: 4.60', 'Google_bi: 0.14', 'Online_bi: -0.25', 'Research_bi: -0.32', 'Late_bi: -0.04', 'beta: 0.038', 'sigma_epsilon2: 0.66')
+color_scheme_set("blue")
+plot_param_rw = mcmc_trace(output_rw[[1]])
+# treat the first 2000 draws as burnin
+# get quantile
+quantile_output_rw = apply(output_rw[[1]][2001:10000,], 2, function(x){quantile(x, probs = c(0, 0.05, 0.5, 0.95, 1))}) 
+quantile_output_rw
+# Sigma
+s1 = seq(6000, (30000-3), 3) + 1
+s2 = seq(6000, (30000-3), 3) + 2
+s3 = seq(6000, (30000-3), 3) + 3
+sigma_mu2 = output_rw[[2]][s1,1]
+sigma_mu_lambda = output_rw[[2]][s2,1]
+sigma_lambda2 = output_rw[[2]][s2,2]
+sigma_mu_beta = output_rw[[2]][s3,1]
+sigma_lambda_beta = output_rw[[2]][s3,2]
+sigma_beta2 = output_rw[[2]][s3,3] # [6001:30000,]
+Sigma = cbind(sigma_mu2, sigma_mu_lambda, sigma_lambda2, sigma_mu_beta, sigma_lambda_beta, sigma_beta2 )
+quantile_Sigma_rw = apply(Sigma, 2, function(x){quantile(x, probs = c(0, 0.05, 0.5, 0.95, 1))}) 
+quantile_Sigma_rw
+s1t = seq(0, (30000-3), 3) + 1
+s2t = seq(0, (30000-3), 3) + 2
+s3t = seq(0, (30000-3), 3) + 3
+sigma_mu2 = output_rw[[2]][s1t,1]
+sigma_mu_lambda = output_rw[[2]][s2t,1]
+sigma_lambda2 = output_rw[[2]][s2t,2]
+sigma_mu_beta = output_rw[[2]][s3t,1]
+sigma_lambda_beta = output_rw[[2]][s3t,2]
+sigma_beta2 = output_rw[[2]][s3t,3] # [6001:30000,]
+Sigmat = cbind(sigma_mu2, sigma_mu_lambda, sigma_lambda2, sigma_mu_beta, sigma_lambda_beta, sigma_beta2 )
+
+plot_Sigma_rw = mcmc_trace(Sigmat)
+```
+
+```{r}
+plot_param_rw 
+plot_Sigma_rw
+```
